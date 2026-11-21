@@ -1,5 +1,5 @@
 #!/bin/sh
-# macOS App Uninstaller - POSIX /bin/sh  (v2)
+# macOS App Uninstaller - POSIX /bin/sh  (v2.1)
 #
 # Uso:
 #   ./uninstall.sh "NomeApp"                      # dry-run (default, non cancella nulla)
