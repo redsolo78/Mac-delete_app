@@ -1,5 +1,10 @@
 #!/bin/sh
-# macOS App Uninstaller - POSIX /bin/sh  (v2.1)
+# macOS App Uninstaller - POSIX /bin/sh  (v2.2)
+#
+# Accesso completo al disco (FDA):
+#   con --delete lo script richiede che il terminale abbia l'Accesso completo al disco;
+#   se manca mostra un popup e si ferma. A fine esecuzione (anche su errore o Ctrl+C)
+#   il permesso viene SEMPRE revocato con tccutil, salvo --keep-fda.
 #
 # Uso:
 #   ./uninstall.sh "NomeApp"                      # dry-run (default, non cancella nulla)
@@ -15,6 +20,7 @@
 #   --forget-pkg    esegue pkgutil --forget sulle ricevute trovate
 #   --bundle-id ID  usa questo bundle ID invece di ricavarlo dall'app
 #   --verbose, -v   output dettagliato
+#   --keep-fda      non revocare a fine script l'Accesso completo al disco del terminale
 #   --trace         set -x
 #   --help, -h      questo aiuto
 
@@ -22,7 +28,9 @@
 # non deve interrompere la rimozione a metà. Gli errori sono gestiti uno per uno.
 set -u
 
-DELETE=0; FORCE=0; KILL=0; FORGET=0; VERBOSE=0
+DELETE=0; FORCE=0; KILL=0; FORGET=0; VERBOSE=0; KEEP_FDA=0
+FDA_REVOKE=0
+CAND=""; UNIQ=""; MATCHES=""; PKG_TMP=""
 APP_ARG=""; BUNDLE_ID=""
 MIN_NAME_LEN=4          # sotto questa lunghezza niente ricerca per nome (troppo generica)
 TAB="$(printf '\t')"
@@ -30,7 +38,7 @@ TAB="$(printf '\t')"
 log(){ printf '%s\n' "$*" >&2; }
 vlog(){ [ "$VERBOSE" -eq 1 ] || return 0; log "$*"; }
 die(){ log "Errore: $*"; exit 1; }
-usage(){ /usr/bin/sed -n '2,22p' "$0" | /usr/bin/sed 's/^# \{0,1\}//'; }
+usage(){ /usr/bin/sed -n '2,28p' "$0" | /usr/bin/sed 's/^# \{0,1\}//'; }
 
 # --- Argomenti ---
 while [ $# -gt 0 ]; do
@@ -39,6 +47,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1 ;;
     --kill) KILL=1 ;;
     --forget-pkg) FORGET=1 ;;
+    --keep-fda) KEEP_FDA=1 ;;
     --verbose|-v) VERBOSE=1 ;;
     --trace) set -x ;;
     --help|-h) usage; exit 0 ;;
@@ -72,6 +81,109 @@ valid_bundle_id(){
 }
 [ -z "$BUNDLE_ID" ] || valid_bundle_id "$BUNDLE_ID" || die "bundle ID non valido: $BUNDLE_ID"
 
+# --- Accesso completo al disco (FDA) del terminale ---
+# Il permesso appartiene all'app terminale che lancia lo script (Terminale, iTerm2...).
+term_bundle_id(){
+  tb="${__CFBundleIdentifier:-}"
+  if [ -z "$tb" ]; then
+    case "${TERM_PROGRAM:-}" in
+      Apple_Terminal) tb="com.apple.Terminal" ;;
+      iTerm.app)      tb="com.googlecode.iterm2" ;;
+      ghostty)        tb="com.mitchellh.ghostty" ;;
+      WarpTerminal)   tb="dev.warp.Warp-Stable" ;;
+      vscode)         tb="com.microsoft.VSCode" ;;
+    esac
+  fi
+  valid_bundle_id "$tb" || return 1
+  printf '%s' "$tb"
+}
+
+term_app_name(){
+  case "$(term_bundle_id 2>/dev/null)" in
+    com.apple.Terminal)     echo "Terminale" ;;
+    com.googlecode.iterm2)  echo "iTerm2" ;;
+    com.mitchellh.ghostty)  echo "Ghostty" ;;
+    dev.warp.Warp-Stable)   echo "Warp" ;;
+    com.microsoft.VSCode)   echo "Visual Studio Code" ;;
+    *)                      echo "il tuo terminale" ;;
+  esac
+}
+
+# Si legge solo con l'Accesso completo al disco
+has_fda(){
+  /usr/bin/head -c 1 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" >/dev/null 2>&1 && return 0
+  /bin/ls "$HOME/Library/Safari" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+FDA_PANE="x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+
+require_fda(){
+  has_fda && return 0
+  tn="$(term_app_name)"
+  msg="Per cancellare i dati delle app, $tn ha bisogno dell'Accesso completo al disco.
+
+1. Impostazioni > Privacy e sicurezza > Accesso completo al disco
+2. Attiva $tn (se non c'è, aggiungilo con +)
+3. Esci da $tn (Cmd+Q), riaprilo e rilancia lo script.
+
+Alla fine lo script toglierà il permesso da solo."
+  log ""
+  log "STOP: $tn non ha l'Accesso completo al disco."
+  log "$msg"
+  btn="$(/usr/bin/osascript \
+          -e 'on run argv' \
+          -e 'display dialog (item 1 of argv) with title "macOS App Uninstaller" buttons {"Annulla", "Apri Impostazioni"} default button 2 cancel button 1 with icon caution' \
+          -e 'return button returned of result' \
+          -e 'end run' "$msg" 2>/dev/null)" || btn=""
+  if [ "$btn" = "Apri Impostazioni" ]; then
+    /usr/bin/open "$FDA_PANE" >/dev/null 2>&1 || true
+  fi
+  exit 3
+}
+
+# shellcheck disable=SC2329  # chiamata dal trap EXIT
+revoke_fda(){
+  [ "$FDA_REVOKE" -eq 1 ] || return 0
+  FDA_REVOKE=0
+  if [ "$KEEP_FDA" -eq 1 ]; then
+    log ""
+    log "Nota: --keep-fda, l'Accesso completo al disco resta attivo per $(term_app_name)."
+    return 0
+  fi
+  if ! tb="$(term_bundle_id)"; then
+    log ""
+    log "Attenzione: non riconosco il terminale, non posso revocare l'Accesso completo al disco."
+    log "  Toglilo a mano: Impostazioni > Privacy e sicurezza > Accesso completo al disco."
+    return 0
+  fi
+  if /usr/bin/tccutil reset SystemPolicyAllFiles "$tb" >/dev/null 2>&1; then
+    log ""
+    log "Accesso completo al disco revocato per $(term_app_name) ($tb)."
+  else
+    log ""
+    log "Attenzione: tccutil non è riuscito a revocare l'accesso per $tb."
+    log "  Toglilo a mano: Impostazioni > Privacy e sicurezza > Accesso completo al disco."
+    /usr/bin/open "$FDA_PANE" >/dev/null 2>&1 || true
+  fi
+}
+
+# shellcheck disable=SC2329  # chiamata dal trap EXIT
+cleanup(){
+  rm -f "$CAND" "$UNIQ" "$MATCHES" "$PKG_TMP" 2>/dev/null
+  revoke_fda
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+if [ "$DELETE" -eq 1 ]; then
+  require_fda
+elif ! has_fda; then
+  log "Nota: senza Accesso completo al disco il dry-run può non vedere tutto (es. l'app nel Cestino)."
+fi
+# Da qui in poi il permesso viene revocato a fine script, qualunque cosa succeda
+FDA_REVOKE=1
+
 # C'è un terminale per chiedere conferma? (lo stdin del ciclo è il file dei candidati)
 HAS_TTY=0
 if (: </dev/tty) 2>/dev/null; then HAS_TTY=1; fi
@@ -91,8 +203,6 @@ CAND="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/uninstall_cand.XXXXXX")" || die "mktemp
 UNIQ="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/uninstall_uniq.XXXXXX")" || die "mktemp fallito"
 MATCHES="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/uninstall_match.XXXXXX")" || die "mktemp fallito"
 PKG_TMP="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/uninstall_pkgs.XXXXXX")" || die "mktemp fallito"
-trap 'rm -f "$CAND" "$UNIQ" "$MATCHES" "$PKG_TMP" 2>/dev/null' EXIT
-trap 'exit 130' INT TERM
 
 APP_PATH=""; APP_NAME=""; APP_EXEC=""
 
