@@ -22,9 +22,33 @@ Di default è in **dry-run**: mostra cosa cancellerebbe senza toccare nulla.
 | `--kill` | Chiude l'app se è in esecuzione |
 | `--forget-pkg` | Con `--delete`, esegue `pkgutil --forget` sulle ricevute trovate |
 | `--bundle-id ID` | Usa questo bundle ID |
+| `--keep-fda` | Non revoca a fine script l'Accesso completo al disco |
 | `--verbose`, `-v` | Output dettagliato |
 | `--trace` | `set -x` |
 | `--help`, `-h` | Aiuto |
+
+## Accesso completo al disco (temporaneo)
+
+Per cancellare i Container delle app macOS richiede che il terminale abbia l'*Accesso completo al disco*.
+Lo script lo gestisce come un permesso **temporaneo**:
+
+1. **All'avvio con `--delete`** controlla se il terminale ha il permesso. Se manca mostra un popup
+   (con pulsante *Apri Impostazioni*) e **si ferma** (exit 3) senza toccare nulla.
+2. **A fine esecuzione** — anche in caso di errore o Ctrl+C — lo revoca con
+   `tccutil reset SystemPolicyAllFiles <terminale>`. Il terminale sparisce dalla lista: la volta dopo va
+   riaggiunto con **+**. Per tenerlo: `--keep-fda`.
+
+Flusso consigliato:
+```sh
+./uninstall.sh "NomeApp"            # dry-run, non serve il permesso
+# Impostazioni > Privacy e sicurezza > Accesso completo al disco > attiva Terminale, Cmd+Q e riapri
+./uninstall.sh "NomeApp" --delete   # cancella e alla fine revoca il permesso
+```
+Attenzione: anche il dry-run revoca il permesso alla fine. Se lo dai prima del dry-run, usa `--keep-fda`
+oppure passa subito a `--delete`.
+
+Terminali riconosciuti: Terminale, iTerm2, Ghostty, Warp, Visual Studio Code. Con un altro terminale lo
+script avvisa e il permesso va tolto a mano.
 
 ## Come classifica i candidati
 
@@ -57,9 +81,14 @@ Saved Application State, Application Scripts, Logs, WebKit, Cookies, LaunchAgent
   (vedi `pkgutil --files <pkg>`).
 - Microsoft Office: lo script non tocca `~/Library/Group Containers/UBF8T346G9.Office`, condiviso tra
   Word/Excel/PowerPoint/Outlook. Cancellalo a mano solo se rimuovi tutto Office.
-- Exit code: `0` ok, `1` errore di uso, `2` alcuni elementi non sono stati rimossi.
+- Exit code: `0` ok, `1` errore di uso, `2` alcuni elementi non sono stati rimossi,
+  `3` manca l'Accesso completo al disco.
 
 ## Changelog
+
+### v2.2
+- Con `--delete` richiede l'Accesso completo al disco: se manca, popup con link alle Impostazioni e stop.
+- A fine script (anche su errore/Ctrl+C) revoca sempre il permesso con `tccutil`; `--keep-fda` per tenerlo.
 
 ### v2.1
 - Si ferma se lanciato con `sudo` (con `$HOME=/var/root` non troverebbe i residui).
